@@ -1,0 +1,21 @@
+#!/data/data/com.termux/files/usr/bin/bash
+if ( grep -E '^[0-9]*$' <<< "$1" &> /dev/null ); then
+	ln="$1"
+	shift
+else
+	ln="0"
+fi
+if ( grep -E '^[0-9]*$' <<< "$1" &> /dev/null ); then
+	n="$1"
+	shift
+else
+	n="0"
+fi
+if [ -f "$1" ]; then
+	f="$1"
+	shift
+else
+	echo "File $1 not found." >&2
+	exit 1
+fi
+sed -n "${ln},+${n}p" "$f"

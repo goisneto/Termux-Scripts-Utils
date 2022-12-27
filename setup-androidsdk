@@ -1,0 +1,9 @@
+#!/data/data/com.termux/files/usr/bin/bash
+export ANDROID_HOME="/data/data/com.termux/files/usr/lib/android-sdk/"
+export NDK="$ANDROID_HOME/ndk/25.1.8937393/"
+export ANDROID_NDK_ROOT="$NDK"
+export PATH="$PATH"\
+":$ANDROID_HOME/cmake/bin/"\
+":$ANDROID_HOME/build-tools/33.0.0/"\
+":$ANDROID_HOME/platform-tools/"\
+":$ANDROID_HOME/tools/bin/"

@@ -1,0 +1,257 @@
+#!/bin/env bash
+fdnull=/dev/null
+RED="\e[31m"
+GREEN="\e[32m"
+BLUE="\e[34m"
+ENDCOLOR="\e[0m"
+ispid () {
+        ( grep -E '^-?[0-9]+$' <<< "$1" &> $fdnull ) && ( ps $1 &> $fdnull )
+}
+
+if ( ispid $1 ); then
+	PID_OUT=$1
+	shift
+else
+	PID_OUT=$$
+fi
+mypath=$( realpath ${BASH_SOURCE[0]} )
+if [ ! -x $mypath ]; then
+        mypath=$( realpath $0 )
+fi
+if [ -z "$(pgrep -a -f $(basename $mypath) | grep "bash" | grep -v "$$")" ]; then
+	echo -e "${RED}\a\n[ Command $(basename $mypath) (PID=$$) RUNNING in another instance ]\n[ Command $(basename $mypath) (PID=$$) ENDING this instance ]\n\v\r${ENDCOLOR}" > /proc/$PID_OUT/fd/1
+	exit 1
+fi
+if ( ispid $1 ); then
+	PID_PROC=$1
+	shift
+else
+	PID_PROC=$PID_OUT
+fi
+USABLE_CORES=$(( $(nproc) * 2 ))
+TOTAL_WORK="$(pgrep --newest)"
+CORES_EXECS=$(( $TOTAL_WORK / $USABLE_CORES ))
+COMMAND=""
+tmp_outputs=()
+renice -20 $$ &> $fdnull
+CORES_LIST=( $(seq 0 $(( $USABLE_CORES - 1 ))) )
+CORES_REMAINS=$(mktemp)
+sum_core_progress_once_file=$(mktemp)
+echo $USABLE_CORES > $CORES_REMAINS
+cleanup () {
+	local fdout
+	if [[ "$1" == "EXIT" ]]; then
+		fdout=/dev/null
+	else
+		fdout=/proc/$PID_OUT/fd/1
+	fi
+	echo -e "${RED}\a[ Command $(basename $mypath) (PID=$$) receive $1 signal ]\r${ENDCOLOR}" > $fdout
+	if [ -f "$CORES_REMAINS" ]; then
+		rm "$CORES_REMAINS"
+	fi
+	if [ -f "$sum_core_progress_once_file" ]; then
+		rm "$sum_core_progress_once_file"
+	fi
+	for core in ${CORES_LIST[@]}; do
+		if [ ! -z "${tmp_outputs[$core]}" ]; then
+			if [ -f "${tmp_outputs[$core]}" ]; then
+				rm "${tmp_outputs[$core]}"
+			fi
+			if [ -d "${tmp_outputs[$core]}.progress" ]; then
+				rm -rf "${tmp_outputs[$core]}.progress"
+			fi
+			if [ -f "${tmp_outputs[$core]}.done" ]; then
+				rm "${tmp_outputs[$core]}.done"
+			fi
+			echo -e "${RED}[ Command $(basename $mypath) (CORE=$core) CLEANUP ]\r${ENDCOLOR}" > $fdout
+		fi
+	done
+	echo -e "${RED}[ Command $(basename $mypath) (PID=$$) ENDING this instance ]\v\r${ENDCOLOR}" > $fdout
+}
+exit_quiet_file=$(mktemp)
+exit_quiet_file_parm=$(mktemp)
+MYPID=$$
+exit_quiet () {
+	if [[ "$1" == "1" ]]; then
+		echo "1" > $exit_quiet_file_parm
+		pgrep -P $MYPID | xargs kill &> $fdnull &
+		pgrep -P $MYPID | xargs wait &> $fdnull
+	elif [[ "$1" == "2" ]]; then
+		echo "2" > $exit_quiet_file_parm
+		kill $! &> $fdnull &
+		wait $! &> $fdnull
+		rm $exit_quiet_file $exit_quiet_file_parm
+	fi
+}
+make_exit_quiet_file () {
+	echo "#!${BASH}" > $exit_quiet_file
+	echo -e "MYPID=$MYPID\nexit_quiet_file='$exit_quiet_file'\nexit_quiet_file_parm='$exit_quiet_file_parm'\nfdnull='$fdnull'\nwhile :; do\n\t[[ "'"$(cat "$exit_quiet_file_parm")" != "" ]] && break\ndone\n[[ "$(cat "$exit_quiet_file_parm")" == "2" ]] && cleanup EXIT' >> $exit_quiet_file
+	cat <<EOF > "$exit_quiet_file.f"
+$(declare -f exit_quiet)
+EOF
+	head -n-1 "$exit_quiet_file.f" | tail -n+3 | sed -r 's/^(\t|    )//g;s/\$1/$(cat "$exit_quiet_file_parm")/g' >> $exit_quiet_file
+	rm "$exit_quiet_file.f"
+	echo -e '( [[ "$(cat "$exit_quiet_file_parm")" == "1" ] && && echo "2" > $exit_quiet_file_parm ) || echo "" > $exit_quiet_file_parm' >> $exit_quiet_file
+	echo "1" > $exit_quiet_file_parm
+}
+trap_identify_signals=()
+trap_identify() {
+    func="$1" ; shift
+    for sig ; do
+	trap_identify_signals+=("$sig")
+        trap "trap - \${trap_identify_signals[@]}; make_exit_quiet_file; exit_quiet 1; $func $sig; exit_quiet 2;" "$sig"
+    done
+}
+trap_identify cleanup INT HUP EXIT KILL QUIT TERM
+echo -e "${GREEN}\a[ Command container_fix_procs (PID=$$ CORES=$USABLE_CORES WORK_PER_CORE=$CORES_EXECS) RUNNING ]\r${ENDCOLOR}" > /proc/$PID_OUT/fd/1
+for core in ${CORES_LIST[@]}; do
+	tmp_outputs[$core]=$(mktemp)
+	CORES_START_EXECS=$(( $CORES_EXECS * $core ))
+	if [ -z "$CORES_START_EXECS" ]; then
+		CORES_START_EXECS=1
+	fi
+	CORES_END_EXECS=$(( $CORES_START_EXECS + $CORES_EXECS ))
+	(
+		renice -20 $BASHPID &> $fdnull
+		progress=1
+		mkdir "${tmp_outputs[$core]}.progress"
+		for pid_procs in $(seq $CORES_START_EXECS $CORES_END_EXECS ); do
+			(
+				ls -d /proc/$pid_procs 2>&1 |
+				grep 'Permission denied'
+			) > /dev/null 2>&1 &&
+			echo " -b /proc/$PID_PROC:/proc/$pid_procs" >> "${tmp_outputs[$core]}"
+			if [[ "$pid_procs" != "$CORES_START_EXECS" ]]; then
+				progress=$(( $progress + 1 ))
+			fi
+			echo "$progess" > "${tmp_outputs[$core]}.progress/$pid_procs"
+		done
+		unset progress
+		touch "${tmp_outputs[$core]}.done"
+		bc <<< "$(cat $CORES_REMAINS) - 1" > $CORES_REMAINS
+		echo -e "${BLUE}\a[ Command $(basename $mypath) (CORE=$core BASHPID=$BASHPID PID=$$ CORES_REMAINS=$(cat $CORES_REMAINS)) DONE ]\r${ENDCOLOR}" > /proc/$PID_OUT/fd/1
+	) &
+done
+find_lastest_core_progress () {
+	for core in ${CORES_LIST[@]}; do
+		local progress_core_dir="${tmp_outputs[$core]}.progress"
+		local progress_core_list="$(find $progress_core_dir -maxdepth 1 -mindepth 1 -print0)"
+		local progress_core_list_count="$(xargs -r -0 -n1 <<< "$progress_core_list" | wc -l)"
+		progress_core_latest () {
+			if (
+				[ -z $not_tail ] &&
+				[ -z $not_head ] && (
+					[ ! -z $1 ] &&
+					[ $1 -gt $progress_core_list_count ]
+				) || (
+					[ ! -z $2 ] &&
+					[ $2 -gt $1 ]
+				)
+			) || (
+				[ ! -z $not_tail ] &&
+				[ ! -z $not_head ] &&
+				(
+					[ ! -z $1 ] ||
+					[ ! -z $2 ]
+				)
+			) || (
+				(
+					[ -z $not_tail ] ||
+					[ -z $not_head ]
+				) &&
+				[ ! -z $2 ] ||
+ 				(
+					[ ! -z $1 ] &&
+					[ $1 -gt $progress_core_list_count ]
+				)
+			); then
+				return 1
+			fi
+			local eval_cmd='xargs -r -0 -n1 <<< "$progress_core_list"'
+			if [ -z "$not_tail" ]; then
+				local tail_idx=$1
+				if [ -z "$tail_idx" ]; then
+					tail_idx=1
+				else
+					shift
+				fi
+				eval_cmd+=" | tail -n$tail_idx"
+			fi
+			if [ -z "$not_head" ]; then
+				local head_idx=$1
+				if [ -z "$head_idx" ]; then
+					head_idx=1
+				else
+					shift
+
+				fi
+				eval_cmd+=" | head -n$head_idx"
+			fi
+			eval "$eval_cmd"
+		}
+		local progress_core_file progress_core_content progress_core_list_line
+		progress_core () {
+			local idx=$1
+			local -n progress_core_file_rf='progress_core_file'
+			local -n progress_core_content_rf='progress_core_content'
+			local -n progress_core_list_line_rf='progress_core_list_line'
+			if [ -z "$idx" ]; then
+				idx=1
+			fi
+			local file="$(progress_core_latest $idx)"
+			if [ $? ]; then
+				return 1
+			fi
+			local rt="$(cat $file)"
+			if [ -z "$rt" ]; then
+				return progress_core $(( $idx + 1 ))
+			else
+				progress_core_list_line_rf="$idx"
+				progress_core_file_rf="$file"
+				progress_core_content_rf="$rt"
+			fi
+		}
+		if ( progress_core ); then
+			xargs -r -0 -n1 <<< "$progress_core_list" | grep -Ev "($(not_head=1 progress_core_latest $progress_core_list_line | tr '\\0' '|'))" | xargs -r echo rm -rf
+			echo "$progress_core_content"
+		else
+			continue
+		fi
+	done
+}
+sum_core_progress_once () {
+	local once="$(cat $sum_core_progress_once_file)"
+	if [ $? -ne 0 ] || [[ "$once" == "1" ]]; then
+		return 1
+	fi
+}
+sum_core_progress () {
+	if ( sum_core_progress_once ); then
+		return 1
+	fi
+	echo 1 > $sum_core_progress_once_file
+	local sum="$(find_lastest_core_progress | xargs -r | tr ' ' '+')"
+	if [ -z $sum ]; then
+		return 1
+	fi
+	local progress="$(( $sum ))"
+	if [ -z $progress ]; then
+		return 1
+	fi
+	echo -ne "${BLUE}[ $(( ( $progress * 100 ) / $TOTAL_WORK ))% | $progress / $TOTAL_WORK ]\r${ENDCOLOR}" > /proc/$PID_OUT/fd/1
+	echo 0 > $sum_core_progress_once_file
+}
+for core in ${CORES_LIST[@]}; do
+	while [ ! -f "${tmp_outputs[$core]}.done" ]; do
+		sum_core_progress &
+		. $exit_quiet_file
+		true
+	done
+	COMMAND+="$(cat ${tmp_outputs[$core]})"
+done
+echo $COMMAND
+echo -e "${GREEN}\a\n[ Command $(basename $mypath) (PID=$$) DONE ]\n\v\r${ENDCOLOR}" > /proc/$PID_OUT/fd/1
+make_exit_quiet_file
+while [[ "$(cat "$exit_quiet_file_parm")" == "" ]]; do
+	. $exit_quiet_file
+done
